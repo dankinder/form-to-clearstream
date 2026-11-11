@@ -12,13 +12,15 @@
  * 3. The script reads the submitted fields (first/last name, email, phone, interests) by matching
  *    column headers against the keywords in FIELD_KEYWORDS below — this makes it tolerant of exact
  *    question wording changes in the form.
- * 4. If a phone number was given, it looks up the subscriber in Clearstream by mobile number. If
- *    found, it updates (PATCH) their info and merges list subscriptions; otherwise it creates
- *    (POST) a new subscriber.
+ * 4. It looks the subscriber up in Clearstream by mobile number if one was given, and by email if
+ *    there was no phone (or the phone matched nobody). If found, it updates their info and merges
+ *    list subscriptions; otherwise it creates (POST) a new subscriber. Email-only people are
+ *    supported; see docs/clearstream-email-only-contacts.md for the API behavior this relies on.
  * 5. The sheet name (e.g. "8.22 Detroit Outing") is used to find-or-create a Clearstream tag
  *    (e.g. "Signup: 8.22 Detroit Outing") and apply it to the subscriber, so you can tell which
  *    event/form each signup came from.
- * 6. Brand-new subscribers (with a phone number) are sent a one-time welcome SMS.
+ * 6. Brand-new subscribers with a phone number are sent a one-time welcome SMS. Email-only people
+ *    get no welcome message.
  *
  * WHAT YOU NEED TO POPULATE
  * --------------------------
@@ -77,7 +79,8 @@ const FIELD_KEYWORDS = {
   phone: "phone"
 };
 
-// One-time SMS sent to brand-new subscribers (only if a phone number was provided).
+// One-time SMS sent to brand-new subscribers (only if a phone number was provided; there is no
+// email equivalent).
 const WELCOME_TEXT_MESSAGE =
   "Welcome to the Michigan International Student Ministry text group, we'll send you updates from this number!\n\nReply STOP to opt out";
 
@@ -166,8 +169,10 @@ function onFormSubmit(e) {
   try {
     let isNewSubscriber = true;
     let existingSubscriber = null;
+    let matchedByEmail = false;
+    let phoneLookupSucceeded = true;
 
-    // 6. Check if subscriber already exists (ONLY if phone is provided)
+    // 6. Check if subscriber already exists, by phone first
     if (phone) {
       console.log(`Making GET request to check subscriber by phone: ${phone}`);
       const searchResponse = UrlFetchApp.fetch(`${CLEARSTREAM_BASE_URL}/subscribers?mobile_number=${encodeURIComponent(phone)}`, {
@@ -185,14 +190,33 @@ function onFormSubmit(e) {
         isNewSubscriber = false;
         existingSubscriber = searchResult.data[0];
       }
-    } else {
-      console.log(`No phone number provided. Skipping GET request search and proceeding directly to creation via email.`);
+      phoneLookupSucceeded = searchResponse.getResponseCode() === 200;
     }
 
-    // 7. Execute PATCH (update) or POST (create)
+    // See docs/clearstream-email-only-contacts.md. GET /subscribers only returns contacts that have a
+    // mobile number, so an email-only contact can only be found by looking up its email directly.
+    // After a failed phone lookup we don't know the phone is really unknown, so don't guess by email.
+    if (!existingSubscriber && email && phoneLookupSucceeded) {
+      const emailMatch = findContactByEmail(CLEARSTREAM_BASE_URL, apiHeaders, email);
+      // A match that already has a *different* mobile number is another person (or a changed number),
+      // so we only adopt matches we could not have found by phone: email-only contacts.
+      if (emailMatch && (!phone || !emailMatch.mobile_number)) {
+        isNewSubscriber = false;
+        existingSubscriber = emailMatch;
+        matchedByEmail = true;
+      }
+    }
+
+    // Contacts identified only by email are tagged by email (they may have no mobile number), and their
+    // write failures are treated as fatal for this submission; phone-identified contacts keep the
+    // original behavior of carrying on regardless.
+    const identifiedByEmail = matchedByEmail || !phone;
+    let writeSucceeded = true;
+
+    // 7. Execute PATCH/PUT (update) or POST (create)
     if (!isNewSubscriber && existingSubscriber) {
       const subscriberId = existingSubscriber.id;
-      console.log(`Subscriber exists (ID: ${subscriberId}). Preparing PATCH request.`);
+      console.log(`Subscriber exists (ID: ${subscriberId}). Preparing ${matchedByEmail ? "PUT by email" : "PATCH"} request.`);
       
       const existingListIds = existingSubscriber.lists ? existingSubscriber.lists.map(list => list.id) : [];
       const combinedListIds = [...new Set([...existingListIds, ...newListIds])];
@@ -214,20 +238,26 @@ function onFormSubmit(e) {
           updatePayload.mobile_number = phone;
       }
 
-      console.log(`PATCH Payload:`, JSON.stringify(updatePayload));
+      console.log(`${matchedByEmail ? "PUT" : "PATCH"} Payload:`, JSON.stringify(updatePayload));
 
-      const patchResponse = UrlFetchApp.fetch(`${CLEARSTREAM_BASE_URL}/subscribers/${subscriberId}`, {
-        method: "patch", 
+      // Clearstream's email-only docs describe PUT for email-addressed updates (see the doc); the
+      // phone path keeps the PATCH-by-id call that has been working in production.
+      const updateUrl = matchedByEmail
+        ? `${CLEARSTREAM_BASE_URL}/subscribers/${encodeURIComponent(email)}`
+        : `${CLEARSTREAM_BASE_URL}/subscribers/${subscriberId}`;
+      const patchResponse = UrlFetchApp.fetch(updateUrl, {
+        method: matchedByEmail ? "put" : "patch",
         headers: apiHeaders,
         payload: JSON.stringify(updatePayload),
-        muteHttpExceptions: true 
+        muteHttpExceptions: true
       });
 
-      console.log(`PATCH Response Code: ${patchResponse.getResponseCode()}`);
-      console.log(`PATCH Response Body: ${patchResponse.getContentText()}`);
+      console.log(`Update Response Code: ${patchResponse.getResponseCode()}`);
+      console.log(`Update Response Body: ${patchResponse.getContentText()}`);
+      writeSucceeded = isSuccess(patchResponse);
 
     } else {
-      console.log(`New subscriber (or email-only). Preparing POST request.`);
+      console.log(`New subscriber. Preparing POST request${phone ? "" : " (email-only)"}.`);
       const subscriberPayload = {
         "first": firstName,
         "last": lastName,
@@ -258,25 +288,30 @@ function onFormSubmit(e) {
       
       console.log(`POST Response Code: ${postResponse.getResponseCode()}`);
       console.log(`POST Response Body: ${postResponse.getContentText()}`);
+      writeSucceeded = isSuccess(postResponse);
     }
 
-    // 8. Apply signup tag based on sheet name (only if phone number is available,
-    //    since the Clearstream tag API requires a mobile number to identify the subscriber)
-    if (phone) {
-      const tagId = findOrCreateTag(CLEARSTREAM_BASE_URL, apiHeaders, signupTagName);
-      if (tagId) {
-        console.log(`Applying tag ID ${tagId} ("${signupTagName}") to ${phone}`);
-        const tagResponse = UrlFetchApp.fetch(`${CLEARSTREAM_BASE_URL}/tags/${tagId}/subscribers`, {
-          method: "post",
-          headers: apiHeaders,
-          payload: JSON.stringify({ "mobile_numbers": [phone] }),
-          muteHttpExceptions: true
-        });
-        console.log(`Tag Apply Response Code: ${tagResponse.getResponseCode()}`);
-        console.log(`Tag Apply Response Body: ${tagResponse.getContentText()}`);
-      }
-    } else {
-      console.log("No phone number — skipping tag application.");
+    if (identifiedByEmail && !writeSucceeded) {
+      // Most likely a 422 because the email address previously opted out of email, which the API
+      // can't override (see docs/clearstream-email-only-contacts.md).
+      console.warn(`Clearstream rejected the subscriber write for email ${email}; skipping tag and welcome text.`);
+      return;
+    }
+
+    // 8. Apply signup tag based on sheet name. Contacts we identified by email are tagged by email,
+    //    since they may have no mobile number for the tag API to use.
+    const tagId = findOrCreateTag(CLEARSTREAM_BASE_URL, apiHeaders, signupTagName);
+    if (tagId) {
+      const tagTarget = identifiedByEmail ? { "emails": [email] } : { "mobile_numbers": [phone] };
+      console.log(`Applying tag ID ${tagId} ("${signupTagName}") to`, JSON.stringify(tagTarget));
+      const tagResponse = UrlFetchApp.fetch(`${CLEARSTREAM_BASE_URL}/tags/${tagId}/subscribers`, {
+        method: "post",
+        headers: apiHeaders,
+        payload: JSON.stringify(tagTarget),
+        muteHttpExceptions: true
+      });
+      console.log(`Tag Apply Response Code: ${tagResponse.getResponseCode()}`);
+      console.log(`Tag Apply Response Body: ${tagResponse.getContentText()}`);
     }
 
     // 9. Send welcome text to new subscribers only
@@ -307,6 +342,39 @@ function onFormSubmit(e) {
   } catch (error) {
     console.error("Caught Exception in API blocks:", error.toString());
   }
+}
+
+function isSuccess(response) {
+  const code = response.getResponseCode();
+  return code >= 200 && code < 300;
+}
+
+// findContactByEmail looks a contact up by email address (case-insensitive on Clearstream's side),
+// returning null if there is none. Works for email-only contacts, which GET /subscribers omits.
+// See docs/clearstream-email-only-contacts.md.
+function findContactByEmail(baseUrl, apiHeaders, email) {
+  console.log(`Looking up contact by email: ${email}`);
+  const response = UrlFetchApp.fetch(`${baseUrl}/subscribers/${encodeURIComponent(email)}`, {
+    method: "get",
+    headers: apiHeaders,
+    muteHttpExceptions: true
+  });
+  console.log(`Email lookup response (${response.getResponseCode()}):`, response.getContentText());
+
+  if (response.getResponseCode() !== 200) {
+    return null;
+  }
+  let body;
+  try {
+    body = JSON.parse(response.getContentText());
+  } catch (error) {
+    // A lookup glitch shouldn't abort the whole signup; treating it as "not found" lets it be created.
+    return null;
+  }
+  // The doc doesn't specify the response shape, so accept a single object or a `data` array.
+  const data = body.data !== undefined ? body.data : body;
+  const contact = Array.isArray(data) ? data[0] : data;
+  return contact && typeof contact === "object" ? contact : null;
 }
 
 // findOrCreateTag looks up a tag by name in Clearstream, creating it if it doesn't exist yet.

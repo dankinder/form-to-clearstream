@@ -7,8 +7,13 @@ signed up from, and new subscribers receive a welcome text.
 See the comment block at the top of [`Code.gs`](./Code.gs) for how it works, what you need to
 configure, and how to set up the trigger in Apps Script.
 
-`Code_phone_only.gs` is an alternate variant for forms that always require a phone number
-(simpler, no email-only fallback).
+People who give an email but no phone number are supported too. Clearstream released this before
+documenting it publicly, so see
+[`docs/clearstream-email-only-contacts.md`](./docs/clearstream-email-only-contacts.md) for the API
+behavior we rely on.
+
+`Code_phone_only.gs` is an older, simpler variant for forms that always require a phone number. It
+does not handle email-only signups.
 
 ## Deploying
 
