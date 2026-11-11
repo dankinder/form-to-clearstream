@@ -1,0 +1,8 @@
+{
+  "name": "form-to-clearstream",
+  "private": true,
+  "description": "Test harness for Code.gs; the script itself is pasted into Apps Script, not run from npm.",
+  "scripts": {
+    "test": "node --test test/code.test.js"
+  }
+}
