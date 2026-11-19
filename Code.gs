@@ -216,7 +216,7 @@ function onFormSubmit(e) {
     // 7. Execute PATCH/PUT (update) or POST (create)
     if (!isNewSubscriber && existingSubscriber) {
       const subscriberId = existingSubscriber.id;
-      console.log(`Subscriber exists (ID: ${subscriberId}). Preparing ${matchedByEmail ? "PUT by email" : "PATCH"} request.`);
+      console.log(`Subscriber exists (ID: ${subscriberId}). Preparing ${matchedByEmail ? "PUT by email" : "PATCH by mobile number"} request.`);
       
       const existingListIds = existingSubscriber.lists ? existingSubscriber.lists.map(list => list.id) : [];
       const combinedListIds = [...new Set([...existingListIds, ...newListIds])];
@@ -240,12 +240,11 @@ function onFormSubmit(e) {
 
       console.log(`${matchedByEmail ? "PUT" : "PATCH"} Payload:`, JSON.stringify(updatePayload));
 
-      // Clearstream's email-only docs describe PUT for email-addressed updates (see the doc); the
-      // phone path keeps the PATCH-by-id call that has been working in production.
-      const updateUrl = matchedByEmail
-        ? `${CLEARSTREAM_BASE_URL}/subscribers/${encodeURIComponent(email)}`
-        : `${CLEARSTREAM_BASE_URL}/subscribers/${subscriberId}`;
-      const patchResponse = UrlFetchApp.fetch(updateUrl, {
+      // Clearstream's update route is addressed by mobile number or email, never by the numeric contact
+      // id (PATCH /subscribers/<id> returns 404, which silently dropped list changes for returning
+      // subscribers).
+      const updateIdentifier = matchedByEmail ? email : (existingSubscriber.mobile_number || phone);
+      const patchResponse = UrlFetchApp.fetch(`${CLEARSTREAM_BASE_URL}/subscribers/${encodeURIComponent(updateIdentifier)}`, {
         method: matchedByEmail ? "put" : "patch",
         headers: apiHeaders,
         payload: JSON.stringify(updatePayload),
@@ -255,6 +254,9 @@ function onFormSubmit(e) {
       console.log(`Update Response Code: ${patchResponse.getResponseCode()}`);
       console.log(`Update Response Body: ${patchResponse.getContentText()}`);
       writeSucceeded = isSuccess(patchResponse);
+      if (!writeSucceeded) {
+        console.error(`Clearstream rejected the update for subscriber ${subscriberId} (HTTP ${patchResponse.getResponseCode()}); their lists were not changed.`);
+      }
 
     } else {
       console.log(`New subscriber. Preparing POST request${phone ? "" : " (email-only)"}.`);
