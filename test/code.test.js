@@ -158,7 +158,7 @@ test("opted-out email-only signup logs a warning and skips tagging without throw
   assert.equal(textRequests(requests).length, 0);
 });
 
-test("existing phone signup is still patched by id and tagged by mobile number", () => {
+test("existing phone signup is patched by the stored mobile number and tagged by mobile number", () => {
   const existing = { id: 99, first: "Jane", last: "Doe", mobile_number: PHONE, email: null, lists: [{ id: 1 }] };
   const { requests } = submitForm({
     phone: PHONE,
@@ -167,12 +167,27 @@ test("existing phone signup is still patched by id and tagged by mobile number",
     overrides: { [`GET /subscribers?mobile_number=${encodeURIComponent(PHONE)}`]: [200, { data: [existing] }] },
   });
 
-  const patch = find(requests, "PATCH", "/subscribers/99");
+  const patch = find(requests, "PATCH", `/subscribers/${encodeURIComponent(PHONE)}`);
   assert.deepEqual(patch.body.lists, [1, 338088]);
   assert.equal(patch.body.email, EMAIL);
+  assert.equal(requests.some((r) => r.route === "/subscribers/99"), false);
   assert.equal(requests.some((r) => r.route.startsWith(`/subscribers/${ENCODED_EMAIL}`)), false);
   assert.deepEqual(tagRequest(requests).body, { mobile_numbers: [PHONE] });
   assert.equal(textRequests(requests).length, 0);
+});
+
+test("existing phone signup whose update is rejected logs an error instead of reporting success", () => {
+  const existing = { id: 99, first: "Jane", last: "Doe", mobile_number: PHONE, email: null, lists: [{ id: 1 }] };
+  const { logs } = submitForm({
+    phone: PHONE,
+    interests: "Church",
+    overrides: {
+      [`GET /subscribers?mobile_number=${encodeURIComponent(PHONE)}`]: [200, { data: [existing] }],
+      [`PATCH /subscribers/${encodeURIComponent(PHONE)}`]: [404, { error: { message: "Resource not found." } }],
+    },
+  });
+
+  assert.ok(logs.error.some((message) => message.includes("404")));
 });
 
 test("new phone-only signup is created, tagged by mobile number, and sent a welcome text", () => {

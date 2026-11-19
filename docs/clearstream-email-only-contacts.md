@@ -128,8 +128,10 @@ Check these against the real API and update this file when known:
   whether it includes `id`. `Code.gs` accepts either.
 - Whether `GET /v1/subscribers/{email}` returns 404 or an empty result when nothing matches.
   `Code.gs` treats both as "not found".
-- The existing code updates with `PATCH`, but Clearstream's message lists `PUT` for updates, so
-  email-based updates use `PUT`. The phone path still uses `PATCH` by id, unchanged.
+- Clearstream's message lists `PUT` for updates, so email-based updates use `PUT`. The phone path
+  uses `PATCH /subscribers/{mobile_number}`, as in Clearstream's public docs. It must not use the
+  numeric `id` from the lookup response: on 2026-11-16 `PATCH /subscribers/{id}` returned 404 and a
+  returning subscriber's new list was never added.
 - Whether `PUT /v1/subscribers/{email}` accepts `mobile_number` (needed to add a phone to an
   email-only contact).
 - Whether `POST /v1/subscribers` merges or replaces `lists` on an existing contact. That is why we
